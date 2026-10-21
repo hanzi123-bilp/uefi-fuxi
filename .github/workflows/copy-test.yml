@@ -1,0 +1,77 @@
+name: build-fuxi-uefi
+
+# Builds the Xiaomi 13 (fuxi) boot image from this repository.
+#
+# This repo is a fork of UniXNU/uefi-sheng: it already carries build_uefi.py,
+# BootShim/, Resources/ and the Mu/Silicium submodules. The fuxi package lives
+# in Platforms/Xiaomi/fuxiPkg and its config in Resources/Configs/fuxi.toml.
+#
+# Pipeline inside build_uefi.py:
+#   BootShim (FD_BASE/FD_SIZE) + SILICIUM_UEFI.fd -> gzip -> + fuxi.dtb
+#   -> Resources/Scripts/mkbootimg.py --header_version 3
+#
+# Ubuntu is enough: edk2's AARCH64 CLANGPDB build does not need macOS.
+# macOS is only required for the XNU kernel stage (xcodebuild + iphoneos SDK).
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Platforms/Xiaomi/fuxiPkg/**'
+      - 'Resources/Configs/fuxi.toml'
+      - 'Resources/DTBs/fuxi.dtb'
+      - '.github/workflows/build-fuxi-uefi.yml'
+
+env:
+  UNIXNU_REPO: https://github.com/UniXNU/UniXNU
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Binaries/ is deliberately skipped: FUXI_VENDOR_HW = 0 builds without
+      # the vendor blob import, and it is several hundred MB.
+      - name: Fetch submodules
+        run: |
+          git submodule update --init --depth 1 \
+            Common/Mu \
+            Common/Mu_OEM_Sample \
+            Mu_Basecore \
+            Silicium-ACPI \
+            Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl
+
+      - name: Static pre-flight
+        run: python3 tools/validate_pkg.py .
+
+      - name: Install toolchain
+        run: ./setup_env.sh -p apt
+
+      - name: Build
+        env:
+          UNIXNU_ROOT: ${{ github.workspace }}/UniXNU
+        run: |
+          git clone --depth 1 "$UNIXNU_REPO" "$UNIXNU_ROOT"
+          ./build_uefi.py -d fuxi -r DEBUG -c
+
+      - name: Inspect result
+        run: |
+          echo "--- artefacts ---"
+          ls -l Mu-fuxi*.img Build/fuxiPkg/DEBUG_CLANGPDB/FV/ 2>/dev/null || true
+          img=$(ls Mu-fuxi*.img 2>/dev/null | head -1)
+          if [ -n "$img" ]; then
+            python3 tools/mkbootimg_v3.py info --image "$img"
+          else
+            echo "::error::no boot image produced"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fuxi-boot-image
+          path: |
+            Mu-fuxi*.img
+            Build/fuxiPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd
+          if-no-files-found: error
